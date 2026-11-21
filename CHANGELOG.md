@@ -1,0 +1,219 @@
+# Changelog
+
+All notable changes to this package are documented here.
+Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+### Changed
+
+- **Orphaned-history cleanup moves histories to a trash folder instead of deleting them.** `Tools > AvatarVCS > Clean Up Orphaned History`, and the automatic sweep, now move the whole folder to `ProjectSettings/AvatarVcs/trash/{avatarGuid}-{timestamp}/`. Nothing prunes the trash. A beta project lost four histories the old way: the VRChat SDK's build tab lists this tool's marker components as ones it will remove — that is what its **Auto Fix** button does, `Undo.DestroyObjectImmediate` on everything outside the SDK's whitelist — and destroying the `AvatarVcsRoot` takes the `avatarGuid` with it, which is the only key the stored history has. Every history then looked orphaned, and the sweep is on by default. "No scene carries this id" is weak evidence that an avatar is gone, so being wrong about it should cost a rename, not version history. `docs/storage-layout.md` says how to move one back.
+
+### Fixed
+
+- **Repair Markers now actually removes the broken components, instead of leaving them beside the restored ones.** The markers came back correctly, but the "missing script" entries they replaced stayed put — so Unity, the VRChat SDK and VRCQuestTools all kept reporting missing scripts and it looked like the repair had done nothing. Unity's own remove-missing-scripts call quietly does nothing on a GameObject inside a prefab instance, which is what an avatar is; the entries are now taken off the object directly. Running Repair Markers again on a scene that was repaired by 0.9.0-poc or 0.10.0-poc finishes the job.
+- **Leaving compare mode no longer drops out of it when the restore didn't happen.** "Restore Original" and "Keep This as Current State" marked compare mode as over before running the checkout. If that checkout failed, or stopped to ask for a missing prefab and was then cancelled, the scene was still showing a compare commit but the compare bar — and both buttons that lead back — were gone. Compare mode now ends when the restore succeeds, the way entering it and toggling already worked.
+- **The SDK build tab no longer lists this tool's components as ones it will remove, so its "Auto Fix" can't destroy them.** The VRChat SDK validates avatars against a whitelist of type *names*, which makes every component in this package illegal; that shows up as an error blocking the build, and the Auto Fix beside it runs `Undo.DestroyObjectImmediate` over all of them. Destroying the `[AvatarVCS]` root takes its `avatarGuid` with it — the only key your commit history is stored under — and unlike a missing script it leaves nothing in the scene file to recover it from. The marker components now implement `VRC.SDKBase.IEditorOnly` (through `IAvatarVcsEditorOnly`, which is an empty interface when no VRChat SDK is installed, so nothing changes for a project without one), and the SDK's validation skips editor-only components. This is the same mechanism Modular Avatar's components use to stay off that list.
+- **Exporting BlendShapes to a place that can't be written no longer fails with a raw exception.** The four preset commands (export/import, for BlendShapes and for material settings) did the same file handling four times over, and not the same way: the material ones reported an unwritable or unreadable file as a one-line console error, the BlendShape export didn't catch anything, and the BlendShape import missed the permission-denied case. They now share one read and one write, so all four report it the way the material ones did. Importing a BlendShape file whose `blendShapes` is written out as `null` is likewise an import of nothing rather than an exception.
+
+### Internal
+
+- `MaterialSettingsApplier`'s 180-line apply method is split along the decisions it makes: resolve the target, write onto the source, or reuse-or-create the one duplicate. The "record the generated guid, point the slot" ending that was written out four times is now one `Assign`. One guard is new: if a freshly created copy can't be loaded back, that slot is reported and left wearing what it had, instead of being pointed at nothing.
+- How a material property's value is written and read back — a color, a float, a texture's tiling/offset — now has one definition, `MaterialValueCodec`, instead of a formatter in each capture path and a parser in each apply path. The parsers had drifted: importing a preset rejected a color with the wrong number of components, while a checkout took the first four of too many and reported too few as an index error. A checkout now skips such a value with the same "expected 4 components" warning the import path gives. Nothing this tool writes itself is affected. Applying a property also stops treating a null dereference or a bad index as "a bad value" to skip — those were only ever excused because the old parsers produced them, and they would have hidden a real bug the same way.
+- "Which materials are the open scenes wearing" moved out of `CommitStore`, the history's storage class, into `SceneMaterialUsage` next to the two things that ask it before deleting a `.mat`: commit deletion and `Clean Up Generated Materials`. The cleanup no longer reaches into the store for a scene query. Behaviour is unchanged. It also gets tests of its own for the case it exists for: a material worn only by a switched-off outfit is still in use.
+- The window's presenter resets "a checkout is waiting on missing-prefab remaps" in one place instead of four, and entering compare mode makes its checkout call once instead of in two near-identical branches. Behaviour is unchanged.
+- "Is this object inside a marker's subtree" — container-managed, untracked, tracked — is asked through one `MarkerScope` helper instead of a `GetComponentInParent<…>(includeInactive: true)` call written out at each of twelve sites. The flag matters (without it a disabled outfit's markers are not seen) and was one omission away from a quiet bug. The helper has tests for exactly that — a marker on a switched-off outfit — which nothing covered before. Behaviour is unchanged.
+
+## [0.10.0-poc] - 2026-09-11
+
+### Changed
+
+- **A checkout writes the recorded material settings onto your material, instead of copying it first.** Copy-on-write was there so your own `.mat` files were never touched — but a copy was made for *every* material slot on the avatar, changed or not, once per commit, and the next commit then recorded the copy as the material to restore onto, so the checkout after that copied the copy. One real avatar reached 552 generated materials — 82% of every material in the project, names six levels deep like `SmartPhone_avatarvcs 3_avatarvcs_avatarvcs_avatarvcs 2_avatarvcs.mat` — all of them rendering identically to the originals. Settings are now applied the same way every other kind of tracked state is: written onto the thing they belong to. Present since 0.5.0-poc, which is when shader settings first started being recorded for real avatars.
+- **A material something outside the avatar is also using is copied rather than changed**, so checking out one avatar can't restyle another, and the console says which object caused it. Same for a material inside a read-only package. There is now exactly **one** copy per material, reused for good, rather than one per commit.
+
+### Added
+
+- **`Tools > AvatarVCS > Clean Up Generated Materials`**, to collect the copies already on disk. It deletes only files that look like this tool's own output, that no commit of any avatar still names, and that no renderer in an open scene is wearing — and if any commit can't be read it deletes nothing at all rather than guessing. On the avatar above that is 552 files and about 13 MB.
+- **`Tools > AvatarVCS > Overwrite Shared Materials`** (off by default): turn it on and a shared material is changed in place too, no copy. For a project where the materials belong to one avatar anyway, the copy is just a file in the way.
+
+## [0.9.0-poc] - 2026-09-10
+
+### Added
+
+- **`Tools > AvatarVCS > Repair Markers`**, for one specific situation: an AvatarVCS update left the `[AvatarVCS]` root, the containers, or the Track/Untrack markers showing "missing script". It reads the guids back out of the saved scene file — Unity keeps a missing component's data even though nothing can read it through the editor — and puts the components back as they were, so the avatar keeps the commit history it already had rather than starting an empty one. It shows exactly what it will restore before doing anything, and leaves alone any missing script it can't identify, including other packages' broken components. Needed once, on the way into the version that ships `.meta` files with the package.
+
+### Changed
+
+- **The commit list, branch config and GUID remapping now record the schema they were written with, and an older AvatarVCS refuses to write over a newer one's.** Unity's JSON reader silently drops fields it has no place for, so an older build that opened a newer build's history, changed one thing and saved it deleted whatever the newer one had recorded. Commits already worked this way; these three now do too. Files written before this release read as current, which is right — they hold exactly the fields this build knows about.
+- The automatic cleanup of orphaned history now stands down while any open scene has a missing script. Whether a history is orphaned is judged from what the scenes reference, and a half-finished package update — exactly what the missing `.meta` files used to cause — makes that judgement unreliable at the worst possible moment. `Tools > AvatarVCS > Clean Up Orphaned History` still runs on request.
+
+### Fixed
+
+- **Updating AvatarVCS no longer breaks every AvatarVCS component in your scene.** The package shipped without a single `.meta` file. Unity generates one for any asset that arrives without it, with a GUID it picks at install time — so every install, and every *update*, handed the same scripts brand-new GUIDs. The components your scene holds are stored as references to those GUIDs, so after an update the `[AvatarVCS]` root and its containers came back as "missing script": the tool reported no root on the avatar, the containers were no longer containers, and the commit history — filed under the `avatarGuid` that lived on the now-missing root component — looked like it had never been made. Running Ensure Root again got the tool working, at the price of a fresh, empty history beside the old one. The `.meta` files are now part of the package and their GUIDs are fixed permanently, so an update leaves the scene alone. **Updating into this version is the last time this happens** — your existing markers were written against whatever GUIDs your current install invented, and those are what this replaces. Run `Tools > AvatarVCS > Repair Markers` once afterwards and they come back with the guids they had, history and all.
+- **A damaged `index.json` no longer costs an avatar its history.** The commit list is a cache — every field in it is copied from the commit files — but a file left truncated by a crash, or edited badly by hand, used to read as "this avatar has no commits", and the next commit then wrote a one-entry list over it. The history was still on disk and nothing could see it again. An unreadable list is now rebuilt from the commit files themselves, and a save that would land on top of one moves it aside (to `index.json.corrupt-<date>`) instead of onto it. `config.json` recovers the same way: each branch's head is its newest commit. A branch created but never committed to leaves no trace in any commit and can't be recovered; nothing else is lost.
+- The same protection covers `guid-remapping.json`, where there is nothing to rebuild from: answering one asset's new GUID after the file was damaged used to erase every answer already given.
+
+## [0.8.0-poc] - 2026-09-09
+
+### Added
+
+- **Export and import a material's shader settings as a small file.** Right-click a material in the Project window → **AvatarVCS → Export Material Settings**. The file records only the properties that differ from the shader's own defaults, so it's a readable handful rather than lilToon's ~490, and it carries no path, no slot and no reference to the material it came from — which is what lets you import it onto a different material, on a different avatar, in a different project. Textures travel as GUIDs and are never embedded: a preset is values only, so it can't stand in for an asset the recipient doesn't already own, and sharing one is safer than sending the `.mat` itself. A property the target shader doesn't have, or a texture the recipient doesn't own, is reported and skipped rather than applied blindly.
+
+### Changed
+
+- The note panel is collapsed by default and no longer takes a fixed slice of the window. Shut, it is one line showing the start of the note — enough to see there is one — and the space goes back to the commit history, which is what you actually look at.
+
+## [0.7.1-poc] - 2026-09-04
+
+### Fixed
+
+- Starting the editor no longer throws `ArgumentException: The scene is not loaded` from `AvatarVcsRoot`. Unity runs `OnValidate` while it restores the last opened scenes, before those scenes are up; the duplicate-avatar self-heal there looked at the scene's root objects and threw. It now skips until the scene is actually loaded — there is no duplicated avatar to heal mid-restore.
+- **The window is responsive again.** Reading a commit's note meant parsing the entire commit, and the note panel did that on every repaint — so every keystroke in the commit message box, and every mouse move over the window, re-read and re-parsed a multi-megabyte file from disk. Introduced in 0.7.0 along with the note field. The note is now read when the selection moves, when it's saved, and on refresh.
+
+## [0.7.0-poc] - 2026-09-04
+
+### Added
+
+- **A free-form note on each commit.** The commit message names a commit in the list and is fixed once made; the note is a multi-line field you can write and rewrite afterwards — "this one is outfit A with hair B, and the shoulder toggle has to be off". It sits under the history list and applies to whichever commit is selected. Older commits simply have none, and an older build ignores the field.
+
+### Changed
+
+- **The changes list is collapsed by default, and costs nothing while it is.** Diffing against the live scene captures the whole avatar — every container, every tracked component, and since 0.5.0 tens of thousands of shader property reads — and the window asked for that again after *any* scene edit. So editing anything with the window open paid for a diff nobody was reading. It is now a "Changes" foldout, and while it is shut that passive capture doesn't happen at all. The "discard your changes?" confirmation before a checkout or branch switch is unaffected; it computes on demand. The passive "you have uncommitted changes" banner reads the same diff, so it now appears only once the panel is open.
+
+### Fixed
+
+- A `layer` outside Unity's 0..31 range in a hand-edited or badly merged commit no longer moves the object onto a wrong layer. It's reported and the object is left where it is — clamping 40 to 31 would just be a different wrong layer, applied silently.
+- The GUID-remapping file is now written with the same crash-safety as commits: flushed to disk before the atomic rename, so a power loss can't leave a file that exists, is the right size, and is full of zeroes. Prefab resolution for every commit relying on a remap depends on it.
+- **Deleting a commit no longer deletes materials your avatar is currently wearing.** Checking out a commit puts the generated duplicate materials into the renderers' slots, and deleting that commit then cleaned those duplicates up — taking the avatar's materials with them. The cleanup now skips any material a renderer in an open scene still uses, and says so; it still collects duplicates nothing points at. This could only bite from 0.5.0 on, when shader settings first started being recorded for real avatars.
+
+### Breaking
+
+- Removed `ContainerManager.EnsureRootWithDefaultTracking`. Its body was byte-identical to `EnsureRootWithDefaults`, which is what the "Ensure Root" command has always called — use that instead. (No known external caller; the package has no reverse dependencies.)
+
+### Internal
+
+- Every GitHub Action is pinned to a commit SHA rather than a moving tag, and the release job's `contents: write` is scoped to that job instead of the whole workflow. The release job hands a write-capable token to a third-party action, so what that tag resolves to matters.
+- The four places that park a new or reparented object at its parent's origin now share `LocalTransform.Reset` instead of writing out the same position/rotation/scale triple, where forgetting one of the three was an easy mistake to make.
+- Every `DiagnosticLog` now reaches the console through one `DiagnosticScope` type instead of a hand-written own-or-borrow block and `try`/`finally` at each of the 14 entry points that take or make one. No direct flush call remains outside that scope, so a new entry point can't forget to flush. Console output is unchanged.
+## [0.6.0-poc] - 2026-09-04
+
+### Added
+
+- **Texture assignments are now versioned along with the colours.** lilToon's second- and third-layer textures, MatCap, outline masks and the rest were left out, so the generated duplicate simply carried whatever texture the source material held at checkout time — swap one and no checkout put the old one back. They are now recorded by GUID (with tiling and offset), restored the same way a material slot is, and "nothing assigned" is restored too, so a checkout can clear a texture the source has since gained.
+
+### Fixed
+
+- **Checkout no longer warns that a material "has changed since this commit was recorded" when it is one whose settings the commit restores.** Adjusting a lilToon colour and committing is the normal workflow, so on every later checkout the warning listed the very materials the tool had just rebuilt from the recorded values — including on every flip in compare mode. Those materials are no longer hash-watched. Assets whose content genuinely can't be reproduced — prefabs, and materials on a shader outside the supported set — still are.
+
+### Changed
+
+- **Checkout is much faster on an avatar with many lilToon materials.** Applying recorded shader settings flushed the whole AssetDatabase once per material slot; on a real avatar that is 46 full flushes per checkout. It now flushes once for the entire checkout, and a slot whose generated duplicate already holds the recorded values isn't rewritten at all — so re-checking out the same commit does almost no asset work. Recorded values still win over a hand-edited duplicate.
+
+## [0.5.0-poc] - 2026-09-04
+
+### Added
+
+- **Tools → AvatarVCS → Clean Up Orphaned History.** An avatar's identity is the id minted onto its `[AvatarVCS]` root, so deleting that root and setting it up again starts a fresh history and strands the old one under `ProjectSettings/AvatarVcs/avatars/` forever. Nothing ever removed those. The new command lists the histories no avatar in the project claims any more, with commit counts and sizes, and deletes them on confirmation — keeping the most recently committed one, in case the root was removed by mistake (an orphan with no commits never takes that slot). If the project can't be searched reliably — assets serialised as binary, an unreadable file, a cancelled scan — nothing is reported as orphaned at all. Deciding what is orphaned searches **every** scene and prefab in the project plus everything currently loaded, not just the open scene, so an avatar living in a scene you don't have open is never mistaken for garbage.
+- Orphaned-history cleanup now also runs **on its own**, once per Unity session, when you open the AvatarVCS window — so the folder doesn't grow forever waiting for someone to remember the menu command. It costs nothing in the normal case: before touching the project it checks whether there are even enough unclaimed histories for the retention rule to remove one, and skips the scan entirely when there aren't. Every safeguard the manual command has still applies — an incomplete scan deletes nothing, and the most recently committed orphan is always kept. Toggle it under **Tools → AvatarVCS → Clean Up Orphaned History Automatically**.
+
+### Fixed
+
+- **lilToon / Poiyomi shader settings are now recorded for real avatars.** Supported shaders were matched by exact name, and the only lilToon name on the list was the plain `lilToon`. Real materials are almost always variants — `Hidden/lilToonOutline`, `Hidden/lilToonTransparent`, `_lil/[Optional] lilToonOverlay` and 60 others — and every one of them was skipped, silently, because an unsupported shader is not something the tool warns about. The result was that an entire avatar could commit no shader settings at all and a checkout had nothing to put back, which looked exactly like "the colour isn't being restored". Shaders are now matched by family, so all lilToon variants, Poiyomi's `Poiyomi Toon` / `Poiyomi Pro` / locked-in shaders, and both MToon generations are covered. lilToon's internal pass shaders (`Hidden/ltspass_*`, `Hidden/ltsother_*`) are still excluded.
+- **Commits no longer record the pose of every bone in your Armature.** Only an accessory that is a prefab instance in its own right (dropped onto a bone, bypassing containers) is supposed to have its Transform tracked; bone pose never was. The check asked whether an object came from a prefab, which is true of *everything* inside a prefab instance — and a real avatar is one — so it excluded nothing. In one real project 534 of a commit's 678 captured components were bones, and dropping them takes that project's stored history from 11.8 MB to 9.3 MB (about 21% smaller; bones are 36% of the captured component data). Existing history keeps working — the surplus entries just restore the pose they already recorded.
+
+### Changed
+
+- Checkout no longer loads every sub-asset of a referenced file just to resolve a reference to that file's main asset. An avatar's AnimatorController can hold hundreds of sub-assets, and the full load happened once per recorded reference per checkout. As a side effect, a damaged internal reference in one of your own assets no longer makes Unity print `Broken text PPtr in file(...)` on every checkout with an AvatarVCS stack trace under it — the underlying problem is in the asset, but AvatarVCS was what forced it into view.
+
+## [0.4.2-poc] - 2026-09-03
+
+### Fixed
+
+- **The commit-deletion cleanup can no longer remove one of your own assets or a whole folder.** Deleting a commit removes the duplicate materials it generated, and the "does this look AvatarVCS-generated?" check ignored the file extension entirely — so a corrupt or badly merged `generatedAssets` list naming a `.prefab`, a `.controller`, or a *folder* GUID would have deleted it (recursively, for a folder). The check now requires a `.mat` and explicitly refuses folders, and is shared with the code that creates the duplicates so the two can't drift apart again.
+- A prefab dropped loose under `[AvatarVCS]` no longer jumps when it is auto-wrapped into a container at commit time. The wrapper was zeroed *after* the prefab was already inside it, so on an avatar not standing at the world origin every adopted prefab was displaced by the avatar's own offset. (#73)
+- A commit whose JSON contains an explicit `null` list (from a hand-edit or a botched merge) no longer throws while diffing. Because the "do you have uncommitted changes?" check runs through the same diff, a single such commit used to make **Switch Branch** and **Checkout** fail outright; both now degrade the diff instead.
+- Committing no longer aborts when a material's shader asset has been deleted or failed to import — the affected slot is skipped, as it already was inside containers.
+
+## [0.4.1-poc] - 2026-09-03
+
+### Fixed
+
+- **Shader settings on a material inside a container now survive a checkout.** An outfit or hairstyle dropped under `[AvatarVCS]` is auto-wrapped into a container, and containers regenerate their prefab instances from the prefab on every checkout — so a lilToon/Poiyomi/MToon main colour (or any other recorded Color/Float property) tweaked on one of those materials reverted to the prefab default. Containers now record those values alongside the BlendShape weights, material slots, and active/tag/layer they already versioned, and re-apply them onto a duplicated material after regeneration. The source `.mat` asset is still never modified.
+- Duplicate materials generated for a container's inner slots are now listed in the commit's `generatedAssets`, so they are reused across checkouts of the same commit instead of piling up, and are cleaned up when that commit is deleted.
+- The diff view now shows a `material settings …` line when a shader value inside a container changes, instead of reporting the container as unchanged.
+
+## [0.4.0-poc] - 2026-09-03
+
+### Added
+
+- Containers now version the BlendShape weights, material slots, and active/tag/layer state you adjust *inside* their prefab instances. On checkout the container is still regenerated from the prefab, then those recorded adjustments are re-applied on top — so "swap this outfit prefab" history and "keep my tweaks to it" no longer conflict.
+
+### Fixed
+
+- Checkout no longer stamps a prefab-instance override onto every tracked renderer. `AvatarReferenceApplier` now writes a BlendShape weight or material slot only when it actually differs from the live value (matching `GameObjectStateApplier`), so restoring a commit whose values already match leaves the prefab instance clean and keeps the Inspector's Overrides dropdown usable.
+- Commit/index/config writes now flush to disk before the atomic rename, so a power loss right after a commit can no longer leave a truncated JSON file that breaks history loading for that avatar.
+- Compare mode no longer leaks an unhandled exception when a selected commit can't be loaded (deleted or corrupt); it reports a "Checkout Failed" dialog like every other checkout path.
+- Closing the AvatarVCS window during a script recompile / play-mode switch no longer runs a scene-mutating checkout mid-domain-reload; compare state is preserved and the window reopens still in compare mode so you can exit it cleanly.
+
+### Changed
+
+- `Ensure Root` no longer creates an empty `[AvatarVCS]/container_1`. Default property tracking already covers the common case, and a loose prefab dropped under `[AvatarVCS]` is auto-wrapped into a container at commit time. README clarified: containers are for prefab add/remove/swap; property tracking is for BlendShape/material/field values.
+- Hierarchy "untracked" markers are now memoized per editor frame instead of re-walking every row's ancestors on every repaint — noticeably lighter with a deep Armature open in the Hierarchy.
+
+### Internal
+
+- Capture/apply diagnostics now flow through a `DiagnosticLog` returned to the caller (one console sink) instead of scattered `Debug.LogWarning` calls; console output is byte-identical.
+- `AvatarVcsWindow` split into a UnityEditor-free `AvatarVcsPresenter` (state + transitions, unit-tested) behind `IHistoryStore` / `IAvatarGateway` / `IUserPrompt` ports, plus thin Editor adapters.
+- New scene-free `AvatarVcs.Tests.Core` assembly with ~70 pure tests; `SnapshotDifferTests` and others relocated there.
+- README's 開発 section records where the (gitignored) design doc lives.
+
+## [0.3.0-poc] - 2026-09-02
+
+### Fixed
+
+- **Default-config avatars now actually record BlendShape / material / lilToon state.** After `Ensure Root` (which tracks the avatar root), capture only ever looked at the tracked target itself — which has no renderer — so a default-config avatar committed none of its BlendShape weights, material references, or shader settings until the user manually un-tracked the root. Capture now walks every renderer in the tracked subtree.
+- **Checkout no longer aborts half-way on a corrupt commit.** A commit JSON with a missing value for a `vector3` / `color` / `gradient` / … field threw `NullReferenceException` past every guard, leaving the avatar with all its containers destroyed and the exception leaking into the editor. Such a field is now warned about and skipped.
+- **`Untrack Properties Here` works in the default config.** It removed a marker that the avatar root's recursive capture ignored, so it did nothing. It now adds an `AvatarVcsUntracked` marker that excludes its whole subtree from capture — the "don't version-control this outfit" opt-out — and `Track Properties Here` lifts it.
+- A failed **Commit** / **Create Branch** no longer corrupts the window's IMGUI layout (`Invalid GUILayout state` spam).
+- **Create Container** no longer throws on its second use — the name auto-numbers (`new_container`, `new_container_1`, …).
+- Loading a commit written by a **newer** AvatarVCS is refused (warn + skip) instead of silently restoring it with unknown fields dropped.
+- Deleting a commit now checks each `generatedAssets` GUID looks AvatarVCS-generated before `AssetDatabase.DeleteAsset` — a hand-edited or corrupt commit can no longer delete your own assets.
+- Capturing a hierarchy with **same-named sibling GameObjects** now warns: path resolution (`Transform.Find`) can't tell them apart, so their tracked state could restore onto the wrong one.
+
+### Changed
+
+- `BlendShapeRef` / `MaterialRef` gain a `path` field (relative to the tracked target; absent in older commits ⇒ the target itself, i.e. unchanged behaviour).
+- Package no longer declares a `com.vrchat.avatars` dependency (no code referenced the VRChat SDK); `documentationUrl` is now populated.
+- Release CI checks out the pushed tag, not `main`, so a tag not on `main`'s tip can't ship an artifact whose contents don't match its name.
+
+### Breaking
+
+- Extracted a `UnityEditor`-free `AvatarVcs.Core` assembly, which moves the public model and reflection types below from `AvatarVcs.Editor.*` to `AvatarVcs.Core.*`. Update any `using` directives that reference the old namespaces.
+  - `AvatarVcs.Editor.Model.*` -> `AvatarVcs.Core.Model.*` (`AssetRef`, `AssetVersionEntry`, `AvatarReferenceState`, `BlendShapePreset`, `BranchConfig`, `Commit`, `CommitIndex`, `ComponentState`, `ContainerDiff`, `ContainerSnapshot`, `FieldValue`, `GuidRemapConfig`, `MaterialSettingsState`, `SceneRef`)
+  - `AvatarVcs.Editor.History.SnapshotDiffer` -> `AvatarVcs.Core.Diff.SnapshotDiffer`
+  - `AvatarVcs.Editor.History.CheckoutResult` / `CheckoutResultKind` -> `AvatarVcs.Core.History.CheckoutResult` / `CheckoutResultKind`
+  - `AvatarVcs.Editor.Reflection.TypeResolver` / `ReservedPropertyNames` -> `AvatarVcs.Core.Reflection.TypeResolver` / `ReservedPropertyNames`
+  - `AvatarVcs.Editor.MaterialSettings.ShaderPropertyMap` -> `AvatarVcs.Core.MaterialSettings.ShaderPropertyMap`
+
+  Stored commit JSON is unaffected: `JsonUtility` serializes by field name only and records neither a type's namespace nor its assembly, so existing commit history under `ProjectSettings/AvatarVcs/` reads back exactly as before.
+
+  Scenes and prefabs are unaffected too: the scene-referenced `Runtime` components (`AvatarVcsRoot`, `AvatarVcsContainer`, `AvatarVcsTrackedReference`) did not move, so existing scenes and prefabs keep working unchanged.
+
+## [0.2.0-poc] - 2026-08-22
+
+- Track Properties now also captures/restores GameObject tag and layer, alongside the existing active/inactive state
+- Fixed several crash-on-corrupted-data bugs in the diff view and BlendShape preset import when handling hand-edited or malformed commit/preset JSON
+- Added MIT license and full VPM package metadata (author, license, vpmDependencies, zipSHA256)
+- Automated releases via GitHub Actions (tag push -> zip, GitHub Release, VPM repo index update)
+
+## [0.1.0-poc] - 2026-08-21
+
+Initial public proof-of-concept release. Design doc Phase 1-4 scope:
+
+- Managed-container lifecycle (destroy/regenerate idempotent prefab-composition tracking)
+- Component field / asset reference / scene reference capture and restore
+- Track Properties: BlendShape, material, and generic component-field tracking on marked subtrees (avatar body/armature/root), including active/inactive state and prefab-instance transforms
+- Material settings duplication and reapplication (dynamic shader property enumeration)
+- Commit history, branches, structured diff, branch compare mode
+- Standalone BlendShape preset export/import
+- EditorWindow UI
